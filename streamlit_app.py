@@ -1,91 +1,69 @@
-# streamlit_app.py
 import streamlit as st
-import sqlite3
-from datetime import date, datetime, timedelta
-from typing import List, Dict, Tuple, Optional
+import pandas as pd
+import calendar
+from io import BytesIO
 
-DB_PATH = "grafik.db"
+# --- Konfiguracja aplikacji ---
+st.set_page_config(page_title="Grafik Ochrony", layout="wide")
+st.title("📅 Grafik Pracowników Ochrony")
 
-# -----------------------
-# Helpers: Polish holidays & working time
-# -----------------------
-def easter_date(year: int) -> date:
-    # Anonymous Gregorian algorithm
-    a = year % 19
-    b = year // 100
-    c = year % 100
-    d = b // 4
-    e = b % 4
-    f = (b + 8) // 25
-    g = (b - f + 1) // 3
-    h = (19 * a + b - d - g + 15) % 30
-    i = c // 4
-    k = c % 4
-    l = (32 + 2 * e + 2 * i - h - k) % 7
-    m = (a + 11 * h + 22 * l) // 451
-    month = (h + l - 7 * m + 114) // 31
-    day = ((h + l - 7 * m + 114) % 31) + 1
-    return date(year, month, day)
+# --- Parametry ---
+year = st.sidebar.number_input("Rok", 2025, 2100, 2025)
+month = st.sidebar.selectbox("Miesiąc", list(range(1, 13)), index=7)
+days_in_month = calendar.monthrange(year, month)[1]
 
-def polish_holidays(year: int) -> List[date]:
-    e = easter_date(year)
-    holidays = [
-        date(year, 1, 1),   # Nowy Rok
-        date(year, 1, 6),   # Trzech Króli
-        e + timedelta(days=1),  # Poniedziałek Wielkanocny
-        date(year, 5, 1),   # Święto Pracy
-        date(year, 5, 3),   # Święto Konstytucji 3 Maja
-        e + timedelta(days=60), # Boże Ciało (czwartek)
-        date(year, 8, 15),  # Wniebowzięcie NMP / Święto Wojska Polskiego
-        date(year, 11, 1),  # Wszystkich Świętych
-        date(year, 11, 11), # Święto Niepodległości
-        date(year, 12, 25), # Boże Narodzenie (pierwszy dzień)
-        date(year, 12, 26), # Boże Narodzenie (drugi dzień)
-    ]
-    return holidays
+# --- Lista pracowników (na start przykładowi) ---
+default_workers = ["PIASECKI LESŁAW", "RYĆ JULIA", "STENCEL PIOTR", "GOŚCINIAK PAWEŁ", "STOPIŃSKI DAMIAN"]
+workers = st.sidebar.text_area("Pracownicy (po jednym wierszu)", "\n".join(default_workers)).splitlines()
 
-def business_days_in_month(year: int, month: int) -> int:
-    # Mon-Fri that are not holidays
-    holidays = set(polish_holidays(year))
-    d = date(year, month, 1)
-    count = 0
-    while d.month == month:
-        if d.weekday() < 5 and d not in holidays:
-            count += 1
-        d += timedelta(days=1)
-    return count
+# --- Symbole i godziny ---
+shift_hours = {"D": 12, "N": 12, "U": 0, "W": 0, "X": 12, "": 0}
 
-def working_time_norm_month(year: int, month: int) -> int:
-    # 8h per working day
-    return business_days_in_month(year, month) * 8
+# --- Tworzenie pustej tabeli ---
+columns = [str(i) for i in range(1, days_in_month + 1)]
+df = pd.DataFrame("", index=workers, columns=columns)
 
-def quarter_of_month(month: int) -> int:
-    return 1 if month <= 3 else (2 if month <= 6 else (3 if month <= 9 else 4))
+# --- Sesja (zachowanie zmian) ---
+if "schedule" not in st.session_state:
+    st.session_state["schedule"] = df.copy()
 
-def working_time_norm_quarter(year: int, quarter: int) -> int:
-    months = {1:[1,2,3], 2:[4,5,6], 3:[7,8,9], 4:[10,11,12]}[quarter]
-    return sum(working_time_norm_month(year, m) for m in months)
+schedule = st.session_state["schedule"]
 
-# -----------------------
-# DB
-# -----------------------
-def get_conn():
-    return sqlite3.connect(DB_PATH, check_same_thread=False)
+# --- Edycja tabeli ---
+edited = st.data_editor(schedule, num_rows="dynamic")
 
-def init_db():
-    with get_conn() as con:
-        cur = con.cursor()
-        cur.execute("""
-        CREATE TABLE IF NOT EXISTS employees(
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            first_name TEXT NOT NULL,
-            last_name TEXT NOT NULL,
-            contract_type TEXT NOT NULL, -- 'UOP' or 'UZ'
-            preference TEXT NOT NULL -- '24H' | 'DNIOWKI' | 'NOCKI' | 'BRAK'
-        );
-        """)
-        cur.execute("""
-        CREATE TABLE IF NOT EXISTS sites(
+# --- Obliczanie sum godzin ---
+def calculate_hours(row):
+    total = 0
+    for v in row:
+        total += shift_hours.get(v, 0)
+    return total
+
+edited["RAZEM"] = edited.apply(calculate_hours, axis=1)
+
+# --- Wyświetlenie tabeli z sumami ---
+st.subheader("✅ Grafik z podsumowaniem")
+st.dataframe(edited, use_container_width=True)
+
+# --- Eksport do Excel ---
+def to_excel(df):
+    output = BytesIO()
+    writer = pd.ExcelWriter(output, engine="openpyxl")
+    df.to_excel(writer, sheet_name="Grafik")
+    writer.close()
+    return output.getvalue()
+
+excel_data = to_excel(edited)
+
+st.download_button(
+    label="💾 Pobierz grafik do Excel",
+    data=excel_data,
+    file_name=f"grafik_{year}_{month}.xlsx",
+    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+)
+
+# --- Zapisywanie zmian ---
+st.session_state["schedule"] = edited.drop(columns=["RAZEM"])
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             name TEXT NOT NULL UNIQUE
         );
